@@ -25,7 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/reform.v1"
 	"gopkg.in/reform.v1/dialects/postgresql"
-	"gopkg.in/yaml.v3"
+	"gopkg.in/yaml.v2"
 
 	"github.com/percona/pmm-managed/models"
 	"github.com/percona/pmm-managed/utils/testdb"
@@ -33,13 +33,14 @@ import (
 
 const (
 	testBadTemplates     = "../../../testdata/ia/bad/*.yml"
-	testBuiltinTemplates = "../../../testdata/ia/builtin/*.yml"
 	testUser2Templates   = "../../../testdata/ia/user2/*.yml"
 	testUserTemplates    = "../../../testdata/ia/user/*.yml"
 	testMissingTemplates = "/no/such/path/*.yml"
 
-	userRuleFilePath    = "/tmp/ia1/user_rule.yml"
-	builtinRuleFilePath = "/tmp/ia1/builtin_rule.yml"
+	userRuleFilepath     = "/etc/ia/rules/user_rule.yml"
+	builtinRuleFilepath1 = "/etc/ia/rules/mysql_down.yml"
+	builtinRuleFilepath2 = "/etc/ia/rules/mysql_restarted.yml"
+	builtinRuleFilepath3 = "/etc/ia/rules/mysql_too_many_connections.yml"
 )
 
 func TestCollect(t *testing.T) {
@@ -64,15 +65,16 @@ func TestCollect(t *testing.T) {
 		t.Parallel()
 
 		svc := NewTemplatesService(db)
-		svc.builtinTemplatesPath = testBuiltinTemplates
 		svc.userTemplatesPath = testUserTemplates
 		svc.collect(ctx)
 
 		rules := svc.getCollected(ctx)
 		require.NotEmpty(t, rules)
-		require.Len(t, rules, 2)
-		assert.Contains(t, rules, "builtin_rule")
+		require.Len(t, rules, 4)
 		assert.Contains(t, rules, "user_rule")
+		assert.Contains(t, rules, "mysql_down")
+		assert.Contains(t, rules, "mysql_restarted")
+		assert.Contains(t, rules, "mysql_too_many_connections")
 
 		// check whether map was cleared and updated on a subsequent call
 		svc.userTemplatesPath = testUser2Templates
@@ -80,9 +82,8 @@ func TestCollect(t *testing.T) {
 
 		rules = svc.getCollected(ctx)
 		require.NotEmpty(t, rules)
-		require.Len(t, rules, 2)
+		require.Len(t, rules, 4)
 		assert.NotContains(t, rules, "user_rule")
-		assert.Contains(t, rules, "builtin_rule")
 		assert.Contains(t, rules, "user2_rule")
 	})
 }
@@ -94,39 +95,61 @@ func TestConvertTemplate(t *testing.T) {
 		ctx := context.Background()
 
 		svc := NewTemplatesService(db)
-		svc.builtinTemplatesPath = testBuiltinTemplates
 		svc.userTemplatesPath = testUserTemplates
 		svc.collect(ctx)
 
 		err := svc.convertTemplates(ctx)
 		require.NoError(t, err)
-		assert.FileExists(t, userRuleFilePath)
-		assert.FileExists(t, builtinRuleFilePath)
+		assert.FileExists(t, userRuleFilepath)
+		assert.FileExists(t, builtinRuleFilepath1)
+		assert.FileExists(t, builtinRuleFilepath2)
+		assert.FileExists(t, builtinRuleFilepath3)
 
-		buf, err := ioutil.ReadFile(builtinRuleFilePath)
-		require.NoError(t, err)
-		var builtinRule ruleFile
-		err = yaml.Unmarshal(buf, &builtinRule)
-		require.NoError(t, err)
-		bRule := builtinRule.Group[0].Rules[0]
-		assert.Equal(t, "builtin_rule", bRule.Alert)
-		assert.Len(t, bRule.Labels, 4)
-		assert.Contains(t, bRule.Labels, "severity")
-		assert.Contains(t, bRule.Labels, "ia")
-		assert.NotNil(t, bRule.Annotations)
-		assert.Len(t, bRule.Annotations, 2)
+		testcases := []struct {
+			path             string
+			alert            string
+			labelsCount      int
+			annotationsCount int
+		}{
+			{
+				path:             builtinRuleFilepath1,
+				alert:            "mysql_down",
+				labelsCount:      3,
+				annotationsCount: 2,
+			},
+			{
+				path:             builtinRuleFilepath2,
+				alert:            "mysql_restarted",
+				labelsCount:      4,
+				annotationsCount: 2,
+			},
+			{
+				path:             builtinRuleFilepath3,
+				alert:            "mysql_too_many_connections",
+				labelsCount:      4,
+				annotationsCount: 2,
+			},
+			{
+				path:             userRuleFilepath,
+				alert:            "user_rule",
+				labelsCount:      4,
+				annotationsCount: 2,
+			},
+		}
 
-		buf, err = ioutil.ReadFile(userRuleFilePath)
-		require.NoError(t, err)
-		var userRule ruleFile
-		err = yaml.Unmarshal(buf, &userRule)
-		require.NoError(t, err)
-		uRule := userRule.Group[0].Rules[0]
-		assert.Equal(t, "user_rule", uRule.Alert)
-		assert.Len(t, uRule.Labels, 4)
-		assert.Contains(t, uRule.Labels, "severity")
-		assert.Contains(t, uRule.Labels, "ia")
-		assert.NotNil(t, uRule.Annotations)
-		assert.Len(t, uRule.Annotations, 2)
+		for _, tc := range testcases {
+			buf, err := ioutil.ReadFile(tc.path)
+			require.NoError(t, err)
+			var rf ruleFile
+			err = yaml.Unmarshal(buf, &rf)
+			require.NoError(t, err)
+			rule := rf.Group[0].Rules[0]
+			assert.Equal(t, tc.alert, rule.Alert)
+			assert.Len(t, rule.Labels, tc.labelsCount)
+			assert.Contains(t, rule.Labels, "severity")
+			assert.Contains(t, rule.Labels, "ia")
+			assert.NotNil(t, rule.Annotations)
+			assert.Len(t, rule.Annotations, tc.annotationsCount)
+		}
 	})
 }

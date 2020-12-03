@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,13 +41,19 @@ import (
 	"google.golang.org/grpc/status"
 	"gopkg.in/reform.v1"
 	"gopkg.in/yaml.v3"
+
+	"github.com/percona/pmm-managed/utils/dir"
 )
 
 const (
-	builtinTemplatesPath = "/tmp/ia1/*.yml"
-	userTemplatesPath    = "/tmp/ia2/*.yml"
+	builtinTemplatesPath = "../../../data/iatemplates/*.yml"
+	userTemplatesPath    = "/srv/ia/templates/*.yml"
 
-	ruleFileDir = "/tmp/ia1/"
+	templatesDir  = "/srv/ia/templates"
+	rulesDir      = "/etc/ia/rules/"
+	prometheusDir = "/srv/prometheus"
+
+	dirPerm = os.FileMode(0o775)
 )
 
 // TemplatesService is responsible for interactions with IA rule templates.
@@ -71,6 +78,34 @@ func NewTemplatesService(db *reform.DB) *TemplatesService {
 	}
 }
 
+// Run creates tempaltes and rules dir
+func (svc *TemplatesService) Run() {
+	svc.l.Info("Starting...")
+	defer svc.l.Info("Done.")
+	params := []dir.Params{
+		// created both the dirs with the same owners as prometheus dir
+		{
+			Path:      templatesDir,
+			Perm:      dirPerm,
+			Chown:     true,
+			ChownPath: prometheusDir,
+		},
+		{
+			Path:      rulesDir,
+			Perm:      dirPerm,
+			Chown:     true,
+			ChownPath: prometheusDir,
+		},
+	}
+
+	for _, p := range params {
+		err := dir.CreateDataDir(p)
+		if err != nil {
+			svc.l.Error(err)
+		}
+	}
+}
+
 func newParamTemplate() *template.Template {
 	return template.New("").Option("missingkey=error").Delims("[[", "]]")
 }
@@ -87,8 +122,9 @@ func (svc *TemplatesService) getCollected(ctx context.Context) map[string]saas.R
 	return res
 }
 
-// collect collects IA rule templates from various sources like
-// built-in templates shipped with PMM and defined by the users.
+// collect collects IA rule templates from various sources like:
+// - builtin templates: read from the generated code in bindata.go
+// - user-defined templates: read from yaml files created by the user in `/srv/ia/templates`
 func (svc *TemplatesService) collect(ctx context.Context) {
 	builtinFilePaths, err := filepath.Glob(svc.builtinTemplatesPath)
 	if err != nil {
@@ -105,7 +141,8 @@ func (svc *TemplatesService) collect(ctx context.Context) {
 	rules := make([]saas.Rule, 0, len(builtinFilePaths)+len(userFilePaths))
 
 	for _, path := range builtinFilePaths {
-		r, err := svc.loadFile(ctx, path)
+		path := strings.Trim(path, "./")
+		r, err := svc.loadBindata(ctx, path)
 		if err != nil {
 			svc.l.Errorf("Failed to load shipped rule template file: %s, reason: %s.", path, err)
 			return
@@ -138,7 +175,31 @@ func (svc *TemplatesService) collect(ctx context.Context) {
 	}
 }
 
-// loadFile parses IA rule template file.
+// loadBindata loads builtin yaml templates using the generated Go code.
+func (svc *TemplatesService) loadBindata(ctx context.Context, file string) ([]saas.Rule, error) {
+	if ctx.Err() != nil {
+		return nil, errors.WithStack(ctx.Err())
+	}
+
+	data, err := Asset(file)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to read rule template file")
+	}
+
+	// be strict about local files
+	params := &saas.ParseParams{
+		DisallowUnknownFields: true,
+		DisallowInvalidRules:  true,
+	}
+	rules, err := saas.Parse(bytes.NewReader(data), params)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to parse rule template file")
+	}
+
+	return rules, nil
+}
+
+// loadFile loads user defined IA rule template from yaml files.
 func (svc *TemplatesService) loadFile(ctx context.Context, file string) ([]saas.Rule, error) {
 	if ctx.Err() != nil {
 		return nil, errors.WithStack(ctx.Err())
@@ -271,17 +332,9 @@ func dumpRule(rule *ruleFile) error {
 	if alertRule.Alert == "" {
 		return errors.New("alert rule not initialized")
 	}
-	path := ruleFileDir + alertRule.Alert + ".yml"
-
-	_, err = os.Stat(ruleFileDir)
-	if os.IsNotExist(err) {
-		err = os.Mkdir(ruleFileDir, 0750) // TODO move to https://jira.percona.com/browse/PMM-7024
-		if err != nil {
-			return err
-		}
-	}
+	path := rulesDir + alertRule.Alert + ".yml"
 	if err = ioutil.WriteFile(path, b, 0644); err != nil {
-		return errors.Errorf("failed to dump rule to file %s: %s", ruleFileDir, err)
+		return errors.Errorf("failed to dump rule to file %s: %s", rulesDir, err)
 
 	}
 	return nil
