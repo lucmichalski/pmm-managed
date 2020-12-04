@@ -56,6 +56,7 @@ func TestCollect(t *testing.T) {
 		svc := NewTemplatesService(db)
 		svc.builtinTemplatesPath = testMissingTemplates
 		svc.userTemplatesPath = testBadTemplates
+		svc.Run()
 		svc.collect(ctx)
 
 		require.Empty(t, svc.getCollected(ctx))
@@ -66,6 +67,7 @@ func TestCollect(t *testing.T) {
 
 		svc := NewTemplatesService(db)
 		svc.userTemplatesPath = testUserTemplates
+		svc.Run()
 		svc.collect(ctx)
 
 		rules := svc.getCollected(ctx)
@@ -96,6 +98,7 @@ func TestConvertTemplate(t *testing.T) {
 
 		svc := NewTemplatesService(db)
 		svc.userTemplatesPath = testUserTemplates
+		svc.Run()
 		svc.collect(ctx)
 
 		err := svc.convertTemplates(ctx)
