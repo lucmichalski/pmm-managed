@@ -142,7 +142,7 @@ func (svc *TemplatesService) collect(ctx context.Context) {
 
 	for _, path := range builtinFilePaths {
 		path := strings.Trim(path, "./")
-		r, err := svc.loadBindata(ctx, path)
+		r, err := svc.loadTemplates(ctx, path, true)
 		if err != nil {
 			svc.l.Errorf("Failed to load shipped rule template file: %s, reason: %s.", path, err)
 			return
@@ -152,7 +152,7 @@ func (svc *TemplatesService) collect(ctx context.Context) {
 	}
 
 	for _, path := range userFilePaths {
-		r, err := svc.loadFile(ctx, path)
+		r, err := svc.loadTemplates(ctx, path, false)
 		if err != nil {
 			svc.l.Errorf("Failed to load user-defined rule template file: %s, reason: %s.", path, err)
 			return
@@ -175,37 +175,19 @@ func (svc *TemplatesService) collect(ctx context.Context) {
 	}
 }
 
-// loadBindata loads builtin yaml templates using the generated Go code.
-func (svc *TemplatesService) loadBindata(ctx context.Context, file string) ([]saas.Rule, error) {
+// loadTemplates loads rule templates from either `bindata.go` (builtin templates) or yaml files (user templates)
+func (svc *TemplatesService) loadTemplates(ctx context.Context, file string, buitin bool) ([]saas.Rule, error) {
 	if ctx.Err() != nil {
 		return nil, errors.WithStack(ctx.Err())
 	}
 
-	data, err := Asset(file)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to read rule template file")
+	var err error
+	var data []byte
+	if buitin {
+		data, err = Asset(file)
+	} else {
+		data, err = ioutil.ReadFile(file) //nolint:gosec
 	}
-
-	// be strict about local files
-	params := &saas.ParseParams{
-		DisallowUnknownFields: true,
-		DisallowInvalidRules:  true,
-	}
-	rules, err := saas.Parse(bytes.NewReader(data), params)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to parse rule template file")
-	}
-
-	return rules, nil
-}
-
-// loadFile loads user defined IA rule template from yaml files.
-func (svc *TemplatesService) loadFile(ctx context.Context, file string) ([]saas.Rule, error) {
-	if ctx.Err() != nil {
-		return nil, errors.WithStack(ctx.Err())
-	}
-
-	data, err := ioutil.ReadFile(file) //nolint:gosec
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to read rule template file")
 	}
